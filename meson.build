@@ -1,0 +1,509 @@
+# SPDX-License-Identifier: GPL-3.0-or-later WITH cryptsetup-OpenSSL-exception
+# This file is part of sscg.
+#
+# sscg is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# sscg is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with sscg.  If not, see <http://www.gnu.org/licenses/>.
+#
+# In addition, as a special exception, the copyright holders give
+# permission to link the code of portions of this program with the
+# OpenSSL library under certain conditions as described in each
+# individual source file, and distribute linked combinations
+# including the two.
+# You must obey the GNU General Public License in all respects
+# for all of the code used other than OpenSSL.  If you modify
+# file(s) with this exception, you may extend this exception to your
+# version of the file(s), but you are not obligated to do so.  If you
+# do not wish to do so, delete this exception statement from your
+# version.  If you delete this exception statement from all source
+# files in the program, then also delete it here.
+#
+# Copyright 2019-2025 by Stephen Gallagher <sgallagh@redhat.com>
+
+project(
+  'sscg',
+  'c',
+version : files('sscg.version'),
+  default_options : ['buildtype=debugoptimized', 'c_std=gnu17', 'warning_level=1', 'b_asneeded=true'],
+  license : 'GPL-3.0-or-later WITH OpenSSL-exception',
+  meson_version : '>=0.59.0',
+)
+
+cc = meson.get_compiler('c')
+test_cflags = [
+  '-Wpointer-arith',
+  '-Wmissing-declarations',
+  '-Wmissing-prototypes',
+  '-Wstrict-prototypes',
+  '-Wuninitialized',
+  '-Werror=implicit',
+  '-Werror=init-self',
+  '-Werror=main',
+  '-Werror=missing-braces',
+  '-Werror=return-type',
+  '-Werror=array-bounds',
+  '-Werror=write-strings',
+  '-DG_LOG_USE_STRUCTURED',
+]
+
+foreach cflag: test_cflags
+  if cc.has_argument(cflag)
+    add_project_arguments(cflag, language : 'c')
+  endif
+endforeach
+
+# Import required modules
+i18n = import('i18n')
+
+# Dependencies
+gettext = dependency('intl', required: false)
+
+crypto = dependency('libcrypto', version: '>= 3.0.0')
+
+ssl = dependency('libssl', version: '>= 3.0.0')
+
+path_utils = dependency('path_utils')
+talloc = dependency('talloc')
+
+popt = dependency(
+    'popt',
+    version : '>=1.14',
+    required : true)
+
+has_ml_dsa = cc.has_header_symbol(
+    'openssl/evp.h',
+    'EVP_PKEY_ML_DSA_44')
+
+sscg_bin_srcs = [
+    'src/arguments.c',
+    'src/sscg.c',
+]
+
+sscg_lib_srcs = [
+    'src/authority.c',
+    'src/bignum.c',
+    'src/cert.c',
+    'src/dhparams.c',
+    'src/logging.c',
+    'src/io_utils.c',
+    'src/key.c',
+    'src/x509.c',
+]
+
+sscg_lib_hdrs = [
+    'include/authority.h',
+    'include/bignum.h',
+    'include/cert.h',
+    'include/dhparams.h',
+    'include/logging.h',
+    'include/io_utils.h',
+    'include/key.h',
+    'include/sscg.h',
+    'include/x509.h',
+]
+
+sscg_lib = static_library(
+    'sscg',
+    sources : sscg_lib_srcs,
+    dependencies : [
+        crypto,
+        ssl,
+        talloc,
+    ],
+    install : false,
+    pic : true,
+)
+
+sscg = executable(
+    'sscg',
+    sscg_bin_srcs,
+    link_with : sscg_lib,
+    dependencies : [
+        crypto,
+        gettext,
+        path_utils,
+        popt,
+        ssl,
+        talloc,
+    ],
+    include_directories : include_directories('.'),
+    install : true,
+)
+
+# Fake test to ensure that all sources and headers are formatted properly
+test_clang_format = find_program('clang-format', required: false)
+if not test_clang_format.found()
+    test_clang_format = disabler()
+endif
+
+clang_args = [ '-i' ]
+test('test_clang_format', test_clang_format,
+     args : clang_args + files(sscg_lib_srcs + sscg_lib_hdrs + sscg_bin_srcs))
+
+create_ca_test = executable(
+    'create_ca_test',
+    'test/create_ca_test.c',
+    link_with : sscg_lib,
+        dependencies: [ crypto ],
+    install:false,
+)
+test('create_ca_test', create_ca_test, timeout: 120)
+
+create_csr_test = executable(
+    'create_csr_test',
+    'test/create_csr_test.c',
+    link_with : sscg_lib,
+        dependencies: [ crypto ],
+    install:false,
+)
+test('create_csr_test', create_csr_test, timeout: 120)
+
+create_cert_test = executable(
+    'create_cert_test',
+    'test/create_cert_test.c',
+    link_with : sscg_lib,
+        dependencies: [ crypto ],
+    install:false,
+)
+test('create_cert_test', create_cert_test, timeout: 300)
+
+generate_rsa_key_test = executable(
+    'generate_rsa_key_test',
+    'test/generate_rsa_key_test.c',
+    link_with : sscg_lib,
+        dependencies: [ crypto ],
+    install:false,
+)
+test('generate_rsa_key_test', generate_rsa_key_test, timeout: 120)
+
+if has_ml_dsa
+generate_mldsa_key_test = executable(
+    'generate_mldsa_key_test',
+    'test/generate_mldsa_key_test.c',
+    link_with : sscg_lib,
+        dependencies: [ crypto ],
+    install:false,
+)
+test('generate_mldsa_key_test', generate_mldsa_key_test, timeout: 120)
+endif
+
+generate_ec_key_test = executable(
+    'generate_ec_key_test',
+    'test/generate_ec_key_test.c',
+    link_with : sscg_lib,
+        dependencies: [ crypto ],
+    install:false,
+)
+test('generate_ec_key_test', generate_ec_key_test, timeout: 120)
+
+generate_serial_test = executable(
+    'generate_serial_test',
+    'test/generate_serial_test.c',
+    link_with : sscg_lib,
+        dependencies: [ crypto ],
+    install:false,
+)
+test('generate_serial_test', generate_serial_test)
+
+init_bignum_test = executable(
+    'init_bignum_test',
+    'test/init_bignum_test.c',
+    link_with : sscg_lib,
+        dependencies: [ crypto ],
+    install : false,
+)
+test('init_bignum_test', init_bignum_test)
+
+
+# Test generating 512-bit, 1024-bit and 2048-bit and 4096 DH params with
+# multiple generators. 2048-bit and larger takes a long time, so they are
+# excluded from the test suite by default.
+
+prime_lengths = [ 512, 1024 ]
+dhparam_timeout = 240
+
+if get_option('run_slow_tests')
+    prime_lengths = prime_lengths + [ 2048, 4096 ]
+    dhparam_timeout = 900
+endif
+
+generators = [ 2, 5 ]
+
+dhparams_test = executable(
+    'dhparams_test',
+    'test/dhparams_test.c',
+    link_with : sscg_lib,
+    dependencies: [ crypto ],
+    install : false
+)
+
+foreach prime_len : prime_lengths
+    foreach g : generators
+        test('dhparams_test_' + prime_len.to_string() + '_' + g.to_string(),
+             dhparams_test,
+             args: [ prime_len.to_string(), g.to_string() ],
+             timeout: dhparam_timeout)
+    endforeach
+endforeach
+
+
+named_dhparams_test = executable(
+    'named_dhparams_test',
+    'test/named_dhparams_test.c',
+    link_with : sscg_lib,
+    dependencies: [ crypto ],
+    install : false,
+)
+# takes *very* long on some architectures like Debian armel
+test('named_dhparams_test', named_dhparams_test, timeout : 2700)
+
+
+test_env = environment()
+test_env.set('LC_ALL', 'C')
+test_env.set ('MESON_SOURCE_ROOT', meson.current_source_dir())
+test_env.set ('MESON_BUILD_ROOT', meson.current_build_dir())
+
+test_rsa_cert_validity = find_program(
+    'test/test_rsa_cert_validity.sh',
+    required: true,
+)
+
+test_ecdsa_cert_validity = find_program(
+    'test/test_ecdsa_cert_validity.sh',
+    required: true,
+)
+
+test_mldsa_cert_validity = find_program(
+    'test/test_mldsa_cert_validity.sh',
+    required: true,
+)
+
+test_dhparams_creation = find_program(
+    'test/test_dhparams_creation.sh',
+    required: true,
+)
+
+hash_algs = [
+    'sha256',
+    'sha384',
+    'sha512',
+]
+
+bad_algs = [
+    'md2',
+    'nonexistent',
+]
+
+cipher_algs = [
+    'des-ede3-cbc',
+    'aes-256-cbc',
+]
+
+key_strengths = [
+    2048,
+    4096,
+]
+if get_option('run_slow_tests')
+    key_strengths = key_strengths + [ 7680, 8192, 15360 ]
+endif
+
+bad_strengths = [
+    512,
+    1024,
+]
+
+foreach hash_alg : hash_algs
+    foreach cipher_alg : cipher_algs
+        foreach key_strength : key_strengths
+            test(
+                'test_rsa_cert_validity_' + hash_alg + '_' + cipher_alg + '_' + key_strength.to_string(),
+                test_rsa_cert_validity,
+                args: [
+                    '--hash-alg', hash_alg,
+                    '--cipher-alg', cipher_alg,
+                    '--key-strength', key_strength.to_string(),
+                ],
+                env: test_env,
+                depends: sscg,
+                timeout: key_strength / 32,
+            )
+        endforeach
+    endforeach
+endforeach
+
+
+foreach hash_alg : bad_algs
+    foreach cipher_alg : cipher_algs
+        foreach key_strength : key_strengths
+            test(
+                'test_cert_invalidity_bad_alg_' + hash_alg + '_' + cipher_alg + '_' + key_strength.to_string(),
+                test_rsa_cert_validity,
+                args: [
+                    '--hash-alg', hash_alg,
+                    '--cipher-alg', cipher_alg,
+                    '--key-strength', key_strength.to_string(),
+                ],
+                env: test_env,
+                depends: sscg,
+                timeout: key_strength / 32,
+                should_fail: true,
+            )
+        endforeach
+    endforeach
+endforeach
+
+foreach hash_alg : hash_algs
+    foreach cipher_alg : cipher_algs
+        foreach key_strength : bad_strengths
+            test(
+                'test_cert_invalidity_bad_strength_' + hash_alg + '_' + cipher_alg + '_' + key_strength.to_string(),
+                test_rsa_cert_validity,
+                args: [
+                    '--hash-alg', hash_alg,
+                    '--cipher-alg', cipher_alg,
+                    '--key-strength', key_strength.to_string(),
+                ],
+                env: test_env,
+                depends: sscg,
+                timeout: key_strength / 32,
+                should_fail: true,
+            )
+        endforeach
+    endforeach
+endforeach
+
+# Test ECDSA certificate validity with various curves and hash algorithms
+ec_curves = [
+    'secp224r1',
+    'secp256k1',
+    'secp384r1',
+    'secp521r1',
+    'prime256v1',
+    'brainpoolP256r1',
+    'brainpoolP256t1',
+    'brainpoolP320r1',
+    'brainpoolP320t1',
+    'brainpoolP384r1',
+    'brainpoolP384t1',
+    'brainpoolP512r1',
+    'brainpoolP512t1',
+]
+
+foreach hash_alg : hash_algs
+    foreach cipher_alg : cipher_algs
+        foreach ec_curve : ec_curves
+            test(
+                'test_ecdsa_cert_validity_' + hash_alg + '_' + cipher_alg + '_' + ec_curve,
+                test_ecdsa_cert_validity,
+                args: [
+                    '--hash-alg', hash_alg,
+                    '--cipher-alg', cipher_alg,
+                    '--ec-curve', ec_curve,
+                ],
+                env: test_env,
+                depends: sscg,
+                timeout: 120,
+            )
+        endforeach
+    endforeach
+endforeach
+
+# Test ML-DSA certificate validity with various NIST levels and hash algorithms
+if has_ml_dsa
+mldsa_nist_levels = [
+    2,
+    3,
+    5,
+]
+
+foreach cipher_alg : cipher_algs
+    foreach nist_level : mldsa_nist_levels
+        test(
+            'test_mldsa_cert_validity_' + cipher_alg + '_nist' + nist_level.to_string(),
+            test_mldsa_cert_validity,
+            args: [
+                '--cipher-alg', cipher_alg,
+                '--mldsa-nist-level', nist_level.to_string(),
+            ],
+            env: test_env,
+            depends: sscg,
+            timeout: 120,
+        )
+    endforeach
+endforeach
+
+# Test that ML-DSA ignores explicit hash-alg specification
+foreach hash_alg : hash_algs
+    foreach cipher_alg : cipher_algs
+        foreach nist_level : mldsa_nist_levels
+            test(
+                'test_mldsa_cert_validity_with_ignored_hash_' + hash_alg + '_' + cipher_alg + '_nist' + nist_level.to_string(),
+                test_mldsa_cert_validity,
+                args: [
+                    '--hash-alg', hash_alg,
+                    '--cipher-alg', cipher_alg,
+                    '--mldsa-nist-level', nist_level.to_string(),
+                ],
+                env: test_env,
+                depends: sscg,
+                timeout: 120,
+            )
+        endforeach
+    endforeach
+endforeach
+endif
+
+# Test DH parameters creation behavior
+test(
+    'test_dhparams_creation',
+    test_dhparams_creation,
+    env: test_env,
+    depends: sscg,
+    timeout: 120,
+)
+
+
+cdata = configuration_data()
+cdata.set_quoted('PACKAGE_VERSION', meson.project_version())
+cdata.set_quoted('PACKAGE_NAME', meson.project_name())
+cdata.set_quoted('LOCALEDIR', join_paths(get_option('prefix'), get_option('datadir'), 'locale'))
+cdata.set('HAVE_GETTEXT', gettext.found())
+cdata.set('HAVE_ML_DSA', has_ml_dsa)
+configure_file(
+    output : 'config.h',
+    configuration : cdata)
+
+# Generate a manpage from the POPT documentation
+help2man = find_program('help2man')
+
+manpage = custom_target('manpage',
+    output : 'sscg.8',
+    capture : true,
+    command : [
+        help2man,
+        '-s', '8',
+        '-n', 'Tool for generating x.509 certificates',
+        '-N',
+        sscg,
+    ],
+    install : true,
+    build_by_default : true,
+    install_dir : join_paths(
+        get_option('prefix'),
+        get_option('mandir'),
+        'man8'),
+)
+
+# Internationalization support
+if gettext.found()
+    subdir('po')
+endif
