@@ -159,13 +159,15 @@ create_cert (TALLOC_CTX *mem_ctx,
 
   if (options->verbosity >= SSCG_DEBUG)
     {
-      const char *tempcert = SSCG_CERT_TYPE_SERVER ? "/tmp/debug-service.csr" :
-                                                     "/tmp/debug-client.csr";
+      const char *tempcert = (type == SSCG_CERT_TYPE_SERVER) ?
+                               "/tmp/debug-service.csr" :
+                               "/tmp/debug-client.csr";
 
       fprintf (stderr, "DEBUG: Writing certificate CSR to %s\n", tempcert);
       BIO *csr_out = BIO_new_file (tempcert, "w");
       int sslret = PEM_write_bio_X509_REQ (csr_out, csr->x509_req);
       CHECK_SSL (sslret, PEM_write_bio_X509_REQ);
+      BIO_free (csr_out);
     }
 
   /* Sign the certificate */

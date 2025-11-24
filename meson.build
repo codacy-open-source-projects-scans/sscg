@@ -32,7 +32,7 @@
 project(
   'sscg',
   'c',
-version : files('sscg.version'),
+  version : files('sscg.version'),
   default_options : ['buildtype=debugoptimized', 'c_std=gnu17', 'warning_level=1', 'b_asneeded=true'],
   license : 'GPL-3.0-or-later WITH OpenSSL-exception',
   meson_version : '>=0.59.0',
@@ -221,14 +221,15 @@ init_bignum_test = executable(
 )
 test('init_bignum_test', init_bignum_test)
 
-test_io_utils = executable(
-    'test_io_utils',
-    'test/test_io_utils.c',
+hostname_validation_test = executable(
+    'hostname_validation_test',
+    ['test/hostname_validation_test.c', 'src/arguments.c'],
     link_with : sscg_lib,
-    dependencies: [ crypto ],
+    dependencies : [ crypto, popt, talloc, gettext ],
+    include_directories : include_directories('.'),
     install : false,
 )
-test('test_io_utils', test_io_utils)
+test('hostname_validation_test', hostname_validation_test)
 
 
 # Test generating 512-bit, 1024-bit and 2048-bit and 4096 DH params with
