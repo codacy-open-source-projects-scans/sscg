@@ -59,7 +59,7 @@ int
 main (int argc, const char **argv)
 {
   int ret, sret;
-  struct sscg_options *options;
+  struct sscg_options *options = NULL;
   bool build_client_cert = false;
   char *dhparams_file = NULL;
 
@@ -75,10 +75,11 @@ main (int argc, const char **argv)
 
   struct sscg_stream *stream = NULL;
 
-  /* Always use umask 0577 for generating certificates and keys
-       This means that it's opened as write-only by the effective
-       user. */
-  umask (0577);
+  /* Always use umask 0177 for generating certificates and keys
+     This means that it's opened as read/write only by the effective
+     user.
+  */
+  umask (0177);
 
 #ifdef HAVE_GETTEXT
   /* Initialize internationalization */
@@ -239,6 +240,11 @@ main (int argc, const char **argv)
 
   /* ==== Output the final files ==== */
 
+  /* First truncate all the files that we're going to write to, in case they
+   * already exist.
+   */
+  ret = sscg_io_utils_truncate_output_files (options->streams);
+  CHECK_OK (ret);
 
   /* Write private keys first */
 
@@ -334,11 +340,14 @@ main (int argc, const char **argv)
   ret = EOK;
 
 done:
-  talloc_zfree (main_ctx);
   if (ret != EOK)
     {
-      SSCG_ERROR ("%s\n", strerror (ret));
+      if (options)
+        {
+          sscg_io_utils_delete_output_files (options->streams);
+        }
     }
+  talloc_zfree (main_ctx);
   if (getenv ("SSCG_TALLOC_REPORT"))
     talloc_report_full (NULL, stderr);
 

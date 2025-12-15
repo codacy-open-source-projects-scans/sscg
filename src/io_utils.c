@@ -37,6 +37,7 @@
 #include <string.h>
 #include <talloc.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "config.h"
 #ifdef HAVE_GETTEXT
@@ -97,22 +98,71 @@ sscg_stream_destructor (TALLOC_CTX *ptr)
   return 0;
 }
 
+static struct sscg_stream *
+sscg_io_utils_get_stream_by_fp (struct sscg_stream **streams, FILE *fp);
 
 static int
-sscg_io_utils_open_file (const char *path, bool overwrite, FILE **fp)
+sscg_io_utils_open_file (const char *path,
+                         bool overwrite,
+                         struct sscg_stream **streams,
+                         FILE **fp)
 {
+  struct sscg_stream *stream = NULL;
   FILE *_fp = NULL;
-  if (overwrite)
-    _fp = fopen (path, "w");
+  int ret;
+
+  /* Try to open with r+ mode (file must exist) */
+  _fp = fopen (path, "r+");
+  if (_fp != NULL)
+    {
+      if (!overwrite)
+        {
+          /* File exists and overwrite is false - check if it's a file we already
+          opened.
+        */
+          stream = sscg_io_utils_get_stream_by_fp (streams, _fp);
+          if (stream != NULL)
+            {
+              *fp = _fp;
+              _fp = NULL;
+              ret = EOK;
+              goto done;
+            }
+
+          /* Otherwise, throw an error */
+          SSCG_ERROR ("File %s already exists\n", path);
+          ret = EEXIST;
+          goto done;
+        }
+    }
+  else if (errno == ENOENT)
+    {
+      /* If file doesn't exist, create it with w+ mode */
+      _fp = fopen (path, "w+");
+      if (!_fp)
+        {
+          SSCG_ERROR (
+            "Could not create file %s: %s\n", path, strerror (errno));
+          ret = errno;
+          goto done;
+        }
+    }
   else
-    _fp = fopen (path, "wx");
-  if (!_fp)
     {
       SSCG_ERROR ("Could not open file %s: %s\n", path, strerror (errno));
-      return errno;
+      ret = errno;
+      goto done;
     }
+
+  /* File was opened successfully and may be overwritten if needed */
   *fp = _fp;
-  return EOK;
+  _fp = NULL;
+  ret = EOK;
+
+done:
+  if (_fp)
+    fclose (_fp);
+  return ret;
 }
 
 
@@ -366,7 +416,7 @@ sscg_io_utils_add_output_key (struct sscg_stream **streams,
   /* Open the file here. If it turns out later that it's already been opened
    * by another stream, we'll close this one and attach to the existing one.
    */
-  ret = sscg_io_utils_open_file (path, overwrite, &fp);
+  ret = sscg_io_utils_open_file (path, overwrite, streams, &fp);
   CHECK_OK (ret);
 
   /* First see if this path already exists in the list */
@@ -691,4 +741,41 @@ sscg_io_utils_finalize_output_files (struct sscg_stream **streams)
     }
 
   return EOK;
+}
+
+
+int
+sscg_io_utils_truncate_output_files (struct sscg_stream **streams)
+{
+  struct sscg_stream *stream = NULL;
+
+  for (int i = 0; (stream = streams[i]) && i < SSCG_NUM_FILE_TYPES; i++)
+    {
+      errno = 0;
+      if (ftruncate (fileno (stream->fp), 0) != 0)
+        return errno;
+      rewind (stream->fp);
+    }
+
+  return EOK;
+}
+
+void
+sscg_io_utils_delete_output_files (struct sscg_stream **streams)
+{
+  struct sscg_stream *stream = NULL;
+  int ret;
+
+  for (int i = 0; (stream = streams[i]) && i < SSCG_NUM_FILE_TYPES; i++)
+    {
+      errno = 0;
+      SSCG_LOG (SSCG_DEBUG, "Deleting file %s\n", stream->path);
+      ret = unlink (stream->path);
+      if (ret != 0)
+        {
+          SSCG_ERROR (
+            "Could not delete file %s: %s\n", stream->path, strerror (errno));
+          continue;
+        }
+    }
 }

@@ -300,6 +300,11 @@ test_dhparams_creation = find_program(
     required: true,
 )
 
+test_expected_failure = find_program(
+    'test/test_expected_failure.sh',
+    required: true,
+)
+
 hash_algs = [
     'sha256',
     'sha384',
@@ -354,8 +359,10 @@ foreach hash_alg : bad_algs
         foreach key_strength : key_strengths
             test(
                 'test_cert_invalidity_bad_alg_' + hash_alg + '_' + cipher_alg + '_' + key_strength.to_string(),
-                test_rsa_cert_validity,
+                test_expected_failure,
                 args: [
+                    '22',
+                    test_rsa_cert_validity.full_path(),
                     '--hash-alg', hash_alg,
                     '--cipher-alg', cipher_alg,
                     '--key-strength', key_strength.to_string(),
@@ -363,7 +370,6 @@ foreach hash_alg : bad_algs
                 env: test_env,
                 depends: sscg,
                 timeout: key_strength / 32,
-                should_fail: true,
             )
         endforeach
     endforeach
@@ -374,8 +380,10 @@ foreach hash_alg : hash_algs
         foreach key_strength : bad_strengths
             test(
                 'test_cert_invalidity_bad_strength_' + hash_alg + '_' + cipher_alg + '_' + key_strength.to_string(),
-                test_rsa_cert_validity,
+                test_expected_failure,
                 args: [
+                    '22',
+                    test_rsa_cert_validity.full_path(),
                     '--hash-alg', hash_alg,
                     '--cipher-alg', cipher_alg,
                     '--key-strength', key_strength.to_string(),
@@ -383,7 +391,6 @@ foreach hash_alg : hash_algs
                 env: test_env,
                 depends: sscg,
                 timeout: key_strength / 32,
-                should_fail: true,
             )
         endforeach
     endforeach
@@ -477,6 +484,30 @@ test(
     env: test_env,
     depends: sscg,
     timeout: 120,
+)
+
+test_file_overwrite = find_program(
+    'test/test_file_overwrite.sh',
+    required: true,
+)
+
+test('test_file_overwrite',
+     test_file_overwrite,
+     env: test_env,
+     depends: sscg,
+     timeout: 120,
+)
+
+test_missing_arg = find_program(
+    'test/test_missing_arg.sh',
+    required: true,
+)
+
+test('test_missing_arg',
+     test_missing_arg,
+     env: test_env,
+     depends: sscg,
+     timeout: 60,
 )
 
 
