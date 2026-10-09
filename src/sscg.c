@@ -281,6 +281,8 @@ main (int argc, const char **argv)
   /* Create CA public certificate */
   stream =
     sscg_io_utils_get_stream_by_type (options->streams, SSCG_FILE_TYPE_CA);
+  CHECK_MEM (stream);
+
   sret = PEM_write_bio_X509 (stream->bio, cacert->certificate);
   CHECK_SSL (sret, PEM_write_bio_X509 (CA));
   ANNOUNCE_WRITE (SSCG_FILE_TYPE_CA);
@@ -335,7 +337,8 @@ main (int argc, const char **argv)
     }
 
   /* Set the final file permissions */
-  sscg_io_utils_finalize_output_files (options->streams);
+  ret = sscg_io_utils_finalize_output_files (options->streams);
+  CHECK_OK (ret);
 
   ret = EOK;
 

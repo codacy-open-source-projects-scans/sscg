@@ -42,6 +42,7 @@
 #include "include/sscg.h"
 #include "include/dhparams.h"
 #include "include/io_utils.h"
+#include "include/names.h"
 
 #include "config.h"
 #ifdef HAVE_GETTEXT
@@ -84,7 +85,7 @@ set_default_options (struct sscg_options *opts)
 
   opts->dhparams_mode = SSCG_CERT_DEFAULT_MODE;
 
-  opts->lifetime = 398;
+  opts->lifetime = SSCG_DEFAULT_CERT_LIFETIME;
 
   opts->dhparams_group = talloc_strdup (opts, "ffdhe4096");
   opts->dhparams_generator = 2;
@@ -163,9 +164,10 @@ sscg_handle_arguments (TALLOC_CTX *mem_ctx,
                        struct sscg_options **config)
 {
   int ret, sret, opt;
-  poptContext pc;
+  poptContext pc = NULL;
   char *minimum_rsa_key_strength_help = NULL;
   char *named_groups_help = NULL;
+  char *cert_lifetime_help = NULL;
   char *key_type = NULL;
   char *ec_curve = NULL;
 
@@ -199,6 +201,10 @@ sscg_handle_arguments (TALLOC_CTX *mem_ctx,
                      _ ("Output well-known DH parameters. The available named "
                         "groups are: %s. (Default: \"ffdhe4096\")"),
                      valid_dh_group_names (tmp_ctx));
+
+  cert_lifetime_help = talloc_asprintf (
+    tmp_ctx, "%d-%d", SSCG_MIN_CERT_LIFETIME, SSCG_MAX_CERT_LIFETIME);
+  CHECK_MEM (cert_lifetime_help);
 
   options->verbosity = SSCG_DEFAULT;
 
@@ -246,7 +252,7 @@ sscg_handle_arguments (TALLOC_CTX *mem_ctx,
       &options->lifetime,
       0,
       _ ("Certificate lifetime (days)."),
-      _ ("1-3650")
+      cert_lifetime_help
     },
 
     {
@@ -863,6 +869,17 @@ sscg_handle_arguments (TALLOC_CTX *mem_ctx,
 
   set_verbosity (options->verbosity);
 
+  if (options->lifetime < SSCG_MIN_CERT_LIFETIME
+      || options->lifetime > SSCG_MAX_CERT_LIFETIME)
+    {
+      fprintf (stderr,
+               _ ("Certificate lifetime must be between %d and %d days.\n"),
+               SSCG_MIN_CERT_LIFETIME,
+               SSCG_MAX_CERT_LIFETIME);
+      ret = EINVAL;
+      goto done;
+    }
+
   /* Process the Subject information */
 
   if (country)
@@ -957,37 +974,8 @@ sscg_handle_arguments (TALLOC_CTX *mem_ctx,
     }
   CHECK_MEM (options->hostname);
 
-  if (strnlen (options->hostname, MAX_FQDN_LEN + 1) > MAX_FQDN_LEN)
-    {
-      fprintf (
-        stderr, _ ("FQDNs may not exceed %d characters\n"), MAX_FQDN_LEN);
-      ret = EINVAL;
-      goto done;
-    }
-
-  /* Check hostname label length (first label for FQDN, entire name for single-label) */
-  char *dot_pos = strchr (options->hostname, '.');
-  size_t label_len;
-
-  if (dot_pos)
-    {
-      /* FQDN: check length of first label (before first dot) */
-      label_len = dot_pos - options->hostname;
-    }
-  else
-    {
-      /* Single-label hostname: check entire hostname length */
-      label_len = strnlen (options->hostname, MAX_HOST_LEN + 1);
-    }
-
-  if (label_len > MAX_HOST_LEN)
-    {
-      fprintf (stderr,
-               _ ("Hostname labels may not exceed %d characters\n"),
-               MAX_HOST_LEN);
-      ret = EINVAL;
-      goto done;
-    }
+  ret = sscg_validate_dns_hostname (options->hostname);
+  CHECK_OK (ret);
 
   /* Use a realloc loop to copy the names from popt into the
        options struct. It's not the most efficient approach, but
@@ -998,6 +986,9 @@ sscg_handle_arguments (TALLOC_CTX *mem_ctx,
     {
       while (alternative_names[i] != NULL)
         {
+          ret = sscg_validate_subject_alt_name (alternative_names[i]);
+          CHECK_OK (ret);
+
           options->subject_alt_names = talloc_realloc (
             options, options->subject_alt_names, char *, i + 1);
           CHECK_MEM (options->subject_alt_names);
@@ -1050,7 +1041,11 @@ sscg_handle_arguments (TALLOC_CTX *mem_ctx,
 #ifdef HAVE_ML_DSA
   else if (strcmp (options->key_type, "mldsa") == 0)
     {
-      if (options->mldsa_nist_level < options->system_security_level)
+      /* The requested ML-DSA NIST level must be at least the system security
+         level or 2, whichever is greater */
+      if (options->mldsa_nist_level < (options->system_security_level > 2 ?
+                                         options->system_security_level :
+                                         2))
         {
           fprintf (stderr,
                    _ ("ML-DSA NIST level must be at least %d.\n"),
@@ -1115,13 +1110,13 @@ sscg_handle_arguments (TALLOC_CTX *mem_ctx,
   if (options->verbosity >= SSCG_VERBOSE)
     print_options (options);
 
-  poptFreeContext (pc);
-
   *config = talloc_steal (mem_ctx, options);
 
   ret = EOK;
 
 done:
+  if (pc)
+    poptFreeContext (pc);
   talloc_free (tmp_ctx);
   return ret;
 }

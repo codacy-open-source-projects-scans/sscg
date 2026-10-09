@@ -35,6 +35,7 @@
 #include <string.h>
 #include "include/sscg.h"
 #include "include/cert.h"
+#include "include/io_utils.h"
 #include "include/x509.h"
 #include "include/key.h"
 
@@ -55,7 +56,7 @@ create_cert (TALLOC_CTX *mem_ctx,
   struct sscg_x509_cert *cert;
   char *dot;
   X509_EXTENSION *ex = NULL;
-  EXTENDED_KEY_USAGE *extended;
+  EXTENDED_KEY_USAGE *extended = NULL;
   TALLOC_CTX *tmp_ctx = NULL;
 
   tmp_ctx = talloc_new (NULL);
@@ -115,18 +116,31 @@ create_cert (TALLOC_CTX *mem_ctx,
   ex = X509V3_EXT_conf_nid (
     NULL, NULL, NID_key_usage, "critical,digitalSignature,keyEncipherment");
   CHECK_MEM (ex);
-  sk_X509_EXTENSION_push (certinfo->extensions, ex);
+  if (!sk_X509_EXTENSION_push (certinfo->extensions, ex))
+    {
+      ret = ENOMEM;
+      goto done;
+    }
 
   extended = sk_ASN1_OBJECT_new_null ();
+  CHECK_MEM (extended);
 
   switch (type)
     {
     case SSCG_CERT_TYPE_SERVER:
-      sk_ASN1_OBJECT_push (extended, OBJ_nid2obj (NID_server_auth));
+      if (!sk_ASN1_OBJECT_push (extended, OBJ_nid2obj (NID_server_auth)))
+        {
+          ret = ENOMEM;
+          goto done;
+        }
       break;
 
     case SSCG_CERT_TYPE_CLIENT:
-      sk_ASN1_OBJECT_push (extended, OBJ_nid2obj (NID_client_auth));
+      if (!sk_ASN1_OBJECT_push (extended, OBJ_nid2obj (NID_client_auth)))
+        {
+          ret = ENOMEM;
+          goto done;
+        }
       break;
 
     default:
@@ -137,13 +151,22 @@ create_cert (TALLOC_CTX *mem_ctx,
 
 
   ex = X509V3_EXT_i2d (NID_ext_key_usage, 0, extended);
-  sk_ASN1_OBJECT_pop_free (extended, ASN1_OBJECT_free);
-  sk_X509_EXTENSION_push (certinfo->extensions, ex);
+  CHECK_MEM (ex);
+
+  if (!sk_X509_EXTENSION_push (certinfo->extensions, ex))
+    {
+      ret = ENOMEM;
+      goto done;
+    }
 
   /* Mark it as not a CA */
   ex = X509V3_EXT_conf_nid (NULL, NULL, NID_basic_constraints, "CA:FALSE");
   CHECK_MEM (ex);
-  sk_X509_EXTENSION_push (certinfo->extensions, ex);
+  if (!sk_X509_EXTENSION_push (certinfo->extensions, ex))
+    {
+      ret = ENOMEM;
+      goto done;
+    }
 
   /* Create a certificate signing request for the private CA */
   if (options->verbosity >= SSCG_VERBOSE)
@@ -159,12 +182,17 @@ create_cert (TALLOC_CTX *mem_ctx,
 
   if (options->verbosity >= SSCG_DEBUG)
     {
-      const char *tempcert = (type == SSCG_CERT_TYPE_SERVER) ?
-                               "/tmp/debug-service.csr" :
-                               "/tmp/debug-client.csr";
+      const char *basename =
+        (type == SSCG_CERT_TYPE_SERVER) ? "debug-service" : "debug-client";
+      char csr_path[256];
+      BIO *csr_out;
 
-      fprintf (stderr, "DEBUG: Writing certificate CSR to %s\n", tempcert);
-      BIO *csr_out = BIO_new_file (tempcert, "w");
+      ret = sscg_io_utils_new_debug_csr_bio (
+        basename, csr_path, sizeof (csr_path), &csr_out);
+      CHECK_OK (ret);
+
+      fprintf (stderr, "DEBUG: Writing certificate CSR to %s\n", csr_path);
+      CHECK_BIO (csr_out, csr_path);
       int sslret = PEM_write_bio_X509_REQ (csr_out, csr->x509_req);
       CHECK_SSL (sslret, PEM_write_bio_X509_REQ);
       BIO_free (csr_out);
@@ -191,6 +219,7 @@ create_cert (TALLOC_CTX *mem_ctx,
 
   ret = EOK;
 done:
+  sk_ASN1_OBJECT_pop_free (extended, ASN1_OBJECT_free);
   talloc_free (tmp_ctx);
   return ret;
 }

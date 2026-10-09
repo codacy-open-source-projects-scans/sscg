@@ -31,6 +31,7 @@
     Copyright 2017-2025 by Stephen Gallagher <sgallagh@redhat.com>
 */
 
+#include <arpa/inet.h>
 #include <string.h>
 
 #include "config.h"
@@ -40,6 +41,7 @@
 
 #include "include/sscg.h"
 #include "include/authority.h"
+#include "include/io_utils.h"
 #include "include/x509.h"
 #include "include/key.h"
 
@@ -88,7 +90,7 @@ create_private_CA (TALLOC_CTX *mem_ctx,
 
   ca_certinfo->org_unit =
     talloc_asprintf (ca_certinfo, "ca-%lu", BN_get_word (serial->bn));
-
+  CHECK_MEM (ca_certinfo->org_unit);
 
   ca_certinfo->email = talloc_strdup (ca_certinfo, options->email);
   CHECK_MEM (ca_certinfo->email);
@@ -125,13 +127,21 @@ create_private_CA (TALLOC_CTX *mem_ctx,
     NID_key_usage,
     "critical,digitalSignature,keyEncipherment,keyCertSign");
   CHECK_MEM (ex);
-  sk_X509_EXTENSION_push (ca_certinfo->extensions, ex);
+  if (!sk_X509_EXTENSION_push (ca_certinfo->extensions, ex))
+    {
+      ret = ENOMEM;
+      goto done;
+    }
 
   /* Mark it as a CA */
   ex = X509V3_EXT_conf_nid (
     NULL, NULL, NID_basic_constraints, "critical,CA:TRUE");
   CHECK_MEM (ex);
-  sk_X509_EXTENSION_push (ca_certinfo->extensions, ex);
+  if (!sk_X509_EXTENSION_push (ca_certinfo->extensions, ex))
+    {
+      ret = ENOMEM;
+      goto done;
+    }
 
   /* Restrict signing to the CN and subjectAltNames of the service certificate */
   name_constraint =
@@ -153,74 +163,71 @@ create_private_CA (TALLOC_CTX *mem_ctx,
               char *slash = strchr (ip_addr, '/');
               char *clean_ip = ip_addr;
               const char *netmask_str = NULL;
+              char ipv4_mask_str[INET_ADDRSTRLEN];
+              char ipv6_mask_str
+                [40]; /* "FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF" */
 
               if (slash)
                 {
-                  /* Extract IP and netmask parts */
+                  /* Extract IP and CIDR prefix length */
                   clean_ip =
                     talloc_strndup (tmp_ctx, ip_addr, slash - ip_addr);
-                  char *cidr_str = slash + 1;
-                  int cidr_bits = atoi (cidr_str);
+                  int cidr_bits = atoi (slash + 1);
 
-                  /* Convert CIDR to appropriate netmask format */
                   if (strchr (clean_ip, ':'))
                     {
-                      /* IPv6 - convert CIDR to hex netmask */
-                      if (cidr_bits == 128)
+                      /* IPv6 - compute hex netmask from CIDR bits (0-128) */
+                      uint16_t groups[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+                      int remaining = cidr_bits;
+                      for (int j = 0; j < 8; j++)
                         {
-                          netmask_str =
-                            "FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF";
+                          if (remaining >= 16)
+                            {
+                              groups[j] = 0xFFFF;
+                              remaining -= 16;
+                            }
+                          else if (remaining > 0)
+                            {
+                              groups[j] = (uint16_t)((uint32_t)0xFFFF
+                                                     << (16 - remaining));
+                              remaining = 0;
+                            }
                         }
-                      else if (cidr_bits == 64)
-                        {
-                          netmask_str = "FFFF:FFFF:FFFF:FFFF:0:0:0:0";
-                        }
-                      else
-                        {
-                          /* For other values, default to /128 */
-                          netmask_str =
-                            "FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF";
-                        }
+                      snprintf (ipv6_mask_str,
+                                sizeof (ipv6_mask_str),
+                                "%X:%X:%X:%X:%X:%X:%X:%X",
+                                groups[0],
+                                groups[1],
+                                groups[2],
+                                groups[3],
+                                groups[4],
+                                groups[5],
+                                groups[6],
+                                groups[7]);
+                      netmask_str = ipv6_mask_str;
                     }
                   else
                     {
-                      /* IPv4 - convert CIDR to dotted decimal */
-                      if (cidr_bits == 32)
-                        {
-                          netmask_str = "255.255.255.255";
-                        }
-                      else if (cidr_bits == 24)
-                        {
-                          netmask_str = "255.255.255.0";
-                        }
-                      else if (cidr_bits == 16)
-                        {
-                          netmask_str = "255.255.0.0";
-                        }
-                      else if (cidr_bits == 8)
-                        {
-                          netmask_str = "255.0.0.0";
-                        }
-                      else
-                        {
-                          /* For other values, default to /32 */
-                          netmask_str = "255.255.255.255";
-                        }
+                      /* IPv4 - compute dotted-decimal netmask from CIDR bits (0-32) */
+                      uint32_t ipv4_bits = (cidr_bits == 0) ?
+                                             0u :
+                                             (0xFFFFFFFFu << (32 - cidr_bits));
+                      struct in_addr mask_addr;
+                      mask_addr.s_addr = htonl (ipv4_bits);
+                      inet_ntop (AF_INET,
+                                 &mask_addr,
+                                 ipv4_mask_str,
+                                 sizeof (ipv4_mask_str));
+                      netmask_str = ipv4_mask_str;
                     }
                 }
               else
                 {
-                  /* No netmask provided - add single host netmask */
+                  /* No netmask provided - use single-host mask */
                   if (strchr (clean_ip, ':'))
-                    {
-                      /* IPv6 - use /128 netmask */
-                      netmask_str = "FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF";
-                    }
+                    netmask_str = "FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF";
                   else
-                    {
-                      /* IPv4 - use /32 netmask */
-                      netmask_str = "255.255.255.255";
-                    }
+                    netmask_str = "255.255.255.255";
                 }
 
               san =
@@ -253,7 +260,11 @@ create_private_CA (TALLOC_CTX *mem_ctx,
       fprintf (stderr, _ ("Invalid name constraint: %s\n"), name_constraint);
       goto done;
     }
-  sk_X509_EXTENSION_push (ca_certinfo->extensions, ex);
+  if (!sk_X509_EXTENSION_push (ca_certinfo->extensions, ex))
+    {
+      ret = ENOMEM;
+      goto done;
+    }
   talloc_free (name_constraint);
 
 
@@ -284,7 +295,11 @@ create_private_CA (TALLOC_CTX *mem_ctx,
       ret = EIO;
       goto done;
     }
-  sk_X509_EXTENSION_push (ca_certinfo->extensions, ex);
+  if (!sk_X509_EXTENSION_push (ca_certinfo->extensions, ex))
+    {
+      ret = ENOMEM;
+      goto done;
+    }
 
   /* Finalize the CSR */
   ret = sscg_x509v3_csr_finalize (ca_certinfo, cakey, csr);
@@ -292,8 +307,15 @@ create_private_CA (TALLOC_CTX *mem_ctx,
 
   if (options->verbosity >= SSCG_DEBUG)
     {
-      fprintf (stderr, "DEBUG: Writing CA CSR to /tmp/debug-ca.csr\n");
-      BIO *ca_csr_out = BIO_new_file ("/tmp/debug-ca.csr", "w");
+      char csr_path[256];
+      BIO *ca_csr_out;
+
+      ret = sscg_io_utils_new_debug_csr_bio (
+        "debug-ca", csr_path, sizeof (csr_path), &ca_csr_out);
+      CHECK_OK (ret);
+
+      fprintf (stderr, "DEBUG: Writing CA CSR to %s\n", csr_path);
+      CHECK_BIO (ca_csr_out, csr_path);
       int sslret = PEM_write_bio_X509_REQ (ca_csr_out, csr->x509_req);
       CHECK_SSL (sslret, PEM_write_bio_X509_REQ);
       BIO_free (ca_csr_out);

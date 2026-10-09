@@ -46,7 +46,7 @@
     {                                                                         \
       if (!ptr)                                                               \
         {                                                                     \
-          ret = errno;                                                        \
+          ret = (errno != 0) ? errno : EIO;                                   \
           fprintf (stderr,                                                    \
                    "Could not write to %s. Check directory permissions.\n",   \
                    file);                                                     \
@@ -100,6 +100,17 @@ enum sscg_file_type
 #define SSCG_FILE_TYPE_CA_TYPES                                               \
   ((1 << SSCG_FILE_TYPE_CA) | (1 << SSCG_FILE_TYPE_CA_KEY))
 
+enum io_utils_errors
+{
+  IO_UTILS_OK = 0,
+  IO_UTILS_TOOMANYKEYS,
+  IO_UTILS_DHPARAMS_NON_EXCLUSIVE,
+  IO_UTILS_CRL_NON_EXCLUSIVE,
+  IO_UTILS_SVC_UNMATCHED,
+  IO_UTILS_CLIENT_UNMATCHED,
+  IO_UTILS_CA_UNMATCHED
+};
+
 #include "include/sscg.h"
 
 
@@ -118,6 +129,10 @@ struct sscg_stream
 
 const char *
 sscg_get_file_type_name (enum sscg_file_type _type);
+
+
+enum io_utils_errors
+sscg_io_utils_validate (struct sscg_stream **streams);
 
 
 int
@@ -209,5 +224,16 @@ sscg_io_utils_truncate_output_files (struct sscg_stream **streams);
 /* Clean up output files if we are exiting early */
 void
 sscg_io_utils_delete_output_files (struct sscg_stream **streams);
+
+/*
+ * Create a unique debug CSR file under /tmp (O_EXCL via mkstemps).
+ * basename is e.g. "debug-service"; path_template must hold at least
+ * strlen("/tmp/") + strlen(basename) + strlen("-XXXXXX.csr") + 1 bytes.
+ */
+int
+sscg_io_utils_new_debug_csr_bio (const char *basename,
+                                 char *path_template,
+                                 size_t path_template_len,
+                                 BIO **_bio);
 
 #endif /* _SSCG_IO_UTILS_H */

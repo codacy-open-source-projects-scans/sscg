@@ -47,6 +47,12 @@
 #include "include/x509.h"
 #include "include/bignum.h"
 
+static int
+sscg_x509_gmtime_adj (ASN1_TIME *time_field, long offset_sec)
+{
+  return X509_gmtime_adj (time_field, offset_sec) != NULL;
+}
+
 int
 sscg_generate_serial (TALLOC_CTX *mem_ctx, struct sscg_bignum **serial)
 {
@@ -337,7 +343,11 @@ sscg_x509v3_csr_new (TALLOC_CTX *mem_ctx,
       goto done;
     }
 
-  sk_X509_EXTENSION_push (certinfo->extensions, ex);
+  if (!sk_X509_EXTENSION_push (certinfo->extensions, ex))
+    {
+      ret = ENOMEM;
+      goto done;
+    }
 
   /* Set the public key for the certificate */
   sslret = X509_REQ_set_pubkey (csr->x509_req, spkey->evp_pkey);
@@ -452,7 +462,11 @@ sscg_sign_x509_csr (TALLOC_CTX *mem_ctx,
   csr = scsr->x509_req;
 
   /* Set the serial number for the new certificate */
-  BN_to_ASN1_INTEGER (serial->bn, X509_get_serialNumber (cert));
+  if (!BN_to_ASN1_INTEGER (serial->bn, X509_get_serialNumber (cert)))
+    {
+      ret = ENOMEM;
+      goto done;
+    }
 
   /* set the issuer name */
   if (issuer)
@@ -466,8 +480,11 @@ sscg_sign_x509_csr (TALLOC_CTX *mem_ctx,
     }
 
   /* set time */
-  X509_gmtime_adj (X509_get_notBefore (cert), 0);
-  X509_gmtime_adj (X509_get_notAfter (cert), days * 24 * 60 * 60);
+  sslret = sscg_x509_gmtime_adj (X509_get_notBefore (cert), 0);
+  CHECK_SSL (sslret, X509_gmtime_adj);
+  sslret = sscg_x509_gmtime_adj (X509_get_notAfter (cert),
+                                 (long)days * 24L * 60L * 60L);
+  CHECK_SSL (sslret, X509_gmtime_adj);
 
   /* set subject */
   subject = X509_NAME_dup (X509_REQ_get_subject_name (csr));
@@ -476,6 +493,8 @@ sscg_sign_x509_csr (TALLOC_CTX *mem_ctx,
 
   /* Copy the extensions from the CSR */
   extensions = X509_REQ_get_extensions (csr);
+  CHECK_MEM (extensions);
+
   for (i = 0; i < sk_X509_EXTENSION_num (extensions); i++)
     {
       ext = sk_X509_EXTENSION_value (extensions, i);
@@ -483,6 +502,7 @@ sscg_sign_x509_csr (TALLOC_CTX *mem_ctx,
       CHECK_SSL (sslret, X509_add_ext);
     }
   sk_X509_EXTENSION_pop_free (extensions, X509_EXTENSION_free);
+  extensions = NULL;
 
   /* set pubkey from req */
   pktmp = X509_REQ_get_pubkey (csr);
@@ -532,6 +552,7 @@ done:
     {
       *_cert = talloc_steal (mem_ctx, scert);
     }
+  sk_X509_EXTENSION_pop_free (extensions, X509_EXTENSION_free);
   X509_NAME_free (subject);
   talloc_free (tmp_ctx);
   return ret;

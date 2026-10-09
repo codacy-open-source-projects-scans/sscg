@@ -30,10 +30,11 @@
 
     Copyright 2019-2025 by Stephen Gallagher <sgallagh@redhat.com>
 */
-
+#define _GNU_SOURCE
 
 #include <assert.h>
 #include <openssl/bio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <talloc.h>
 #include <sys/stat.h>
@@ -92,7 +93,8 @@ sscg_stream_destructor (TALLOC_CTX *ptr)
   /* Zero out the memory before freeing it so we don't leak passwords */
   if (stream->passphrase)
     {
-      memset (stream->passphrase, 0, strnlen (stream->passphrase, MAX_PW_LEN));
+      OPENSSL_cleanse (stream->passphrase,
+                       strnlen (stream->passphrase, MAX_PW_LEN));
     }
 
   return 0;
@@ -132,6 +134,18 @@ sscg_io_utils_open_file (const char *path,
           /* Otherwise, throw an error */
           SSCG_ERROR ("File %s already exists\n", path);
           ret = EEXIST;
+          goto done;
+        }
+
+      /* Overwriting an existing file: restrict permissions immediately so the
+         old (possibly loose) mode is not in effect while content is written.
+         sscg_io_utils_finalize_output_files() applies the final mode. */
+      if (fchmod (fileno (_fp), S_IRUSR | S_IWUSR) != 0)
+        {
+          SSCG_ERROR ("Could not restrict permissions on %s: %s\n",
+                      path,
+                      strerror (errno));
+          ret = errno;
           goto done;
         }
     }
@@ -181,7 +195,7 @@ sscg_io_utils_get_stream_by_fp (struct sscg_stream **streams, FILE *fp)
     }
 
   /* First see if this path already exists in the list */
-  for (int i = 0; (stream = streams[i]) && i < SSCG_NUM_FILE_TYPES; i++)
+  for (int i = 0; i < SSCG_NUM_FILE_TYPES && (stream = streams[i]); i++)
     {
       ret = fstat (fileno (stream->fp), &saved_st);
       if (ret != 0)
@@ -206,14 +220,14 @@ sscg_io_utils_get_stream_by_type (struct sscg_stream **streams,
 {
   struct sscg_stream *stream = NULL;
 
-  if (filetype < 0 || filetype > SSCG_NUM_FILE_TYPES)
+  if (filetype < 0 || filetype >= SSCG_NUM_FILE_TYPES)
     {
       SSCG_LOG (SSCG_DEFAULT, "Unknown filetype for stream");
       return NULL;
     }
 
   /* First see if this path already exists in the list */
-  for (int i = 0; (stream = streams[i]) && i < SSCG_NUM_FILE_TYPES; i++)
+  for (int i = 0; i < SSCG_NUM_FILE_TYPES && (stream = streams[i]); i++)
     {
       SSCG_LOG (SSCG_DEBUG,
                 "Checking for 0x%.4x in 0x%.4x\n",
@@ -278,7 +292,7 @@ sscg_secure_string_steal (TALLOC_CTX *mem_ctx, char *src)
 {
   char *dest = talloc_strdup (mem_ctx, src);
 
-  memset ((void *)src, 0, strlen (src));
+  OPENSSL_cleanse ((void *)src, strlen (src));
 
   return dest;
 }
@@ -313,12 +327,11 @@ validate_passphrase (struct sscg_stream *stream)
 static char *
 sscg_read_pw_file (TALLOC_CTX *mem_ctx, char *path)
 {
-  int i;
   BIO *pwdbio = NULL;
   char tpass[MAX_PW_LEN + 1];
-  int offset = 0;
   char *tmp = NULL;
   char *password = NULL;
+  int nbytes;
 
   pwdbio = BIO_new_file (path, "r");
   if (pwdbio == NULL)
@@ -327,19 +340,13 @@ sscg_read_pw_file (TALLOC_CTX *mem_ctx, char *path)
       return NULL;
     }
 
-  /* Read up to one more character than the MAX_PW_LEN */
-  for (offset = 0;
-       (i = BIO_read (pwdbio, tpass + offset, MAX_PW_LEN + 1 - offset)) > 0
-       && offset < (MAX_PW_LEN + 1);
-       offset += i)
-    ;
-
-  tpass[MAX_PW_LEN] = '\0';
+  tpass[0] = '\0';
+  nbytes = BIO_gets (pwdbio, tpass, sizeof (tpass));
 
   BIO_free_all (pwdbio);
   pwdbio = NULL;
 
-  if (i < 0)
+  if (nbytes < 0)
     {
       fprintf (stderr, _ ("Error reading password from BIO\n"));
       return NULL;
@@ -351,7 +358,7 @@ sscg_read_pw_file (TALLOC_CTX *mem_ctx, char *path)
 
   password = talloc_strdup (mem_ctx, tpass);
 
-  memset (tpass, 0, MAX_PW_LEN + 1);
+  OPENSSL_cleanse (tpass, sizeof (tpass));
 
   return password;
 }
@@ -372,7 +379,7 @@ sscg_io_utils_add_output_key (struct sscg_stream **streams,
   FILE *fp = NULL;
   struct sscg_stream *stream = NULL;
 
-  if (filetype < 0 || filetype > SSCG_NUM_FILE_TYPES)
+  if (filetype < 0 || filetype >= SSCG_NUM_FILE_TYPES)
     {
       SSCG_ERROR ("Unknown filetype for stream");
       return EINVAL;
@@ -470,7 +477,11 @@ sscg_io_utils_add_output_key (struct sscg_stream **streams,
 
 
   /* Set the password options */
-  stream->pass_prompt = pass_prompt;
+
+  /* If we are sharing this file with other filetypes, we want to ensure that
+     if any of them need to prompt for a password, a subsequent call of this
+     function won't clear it.*/
+  stream->pass_prompt |= pass_prompt;
 
   if (passphrase)
     {
@@ -516,25 +527,14 @@ sscg_io_utils_add_output_file (struct sscg_stream **streams,
 
 
 enum io_utils_errors
-{
-  IO_UTILS_OK = 0,
-  IO_UTILS_TOOMANYKEYS,
-  IO_UTILS_DHPARAMS_NON_EXCLUSIVE,
-  IO_UTILS_CRL_NON_EXCLUSIVE,
-  IO_UTILS_SVC_UNMATCHED,
-  IO_UTILS_CLIENT_UNMATCHED,
-  IO_UTILS_CA_UNMATCHED
-};
-
-static enum io_utils_errors
-io_utils_validate (struct sscg_stream **streams)
+sscg_io_utils_validate (struct sscg_stream **streams)
 {
   enum io_utils_errors ret;
   struct sscg_stream *stream = NULL;
   int keybits;
   int allbits = 0;
 
-  for (int i = 0; (stream = streams[i]) && i < SSCG_NUM_FILE_TYPES; i++)
+  for (int i = 0; i < SSCG_NUM_FILE_TYPES && (stream = streams[i]); i++)
     {
       SSCG_LOG (SSCG_DEBUG, "filetypes: 0x%.4x\n", stream->filetypes);
 
@@ -562,6 +562,14 @@ io_utils_validate (struct sscg_stream **streams)
           && (stream->filetypes ^ (1 << SSCG_FILE_TYPE_CRL)))
         {
           ret = IO_UTILS_CRL_NON_EXCLUSIVE;
+          goto done;
+        }
+
+      /* The dhparams file may only contain DH parameters */
+      if ((stream->filetypes & (1 << SSCG_FILE_TYPE_DHPARAMS))
+          && (stream->filetypes != (1 << SSCG_FILE_TYPE_DHPARAMS)))
+        {
+          ret = IO_UTILS_DHPARAMS_NON_EXCLUSIVE;
           goto done;
         }
     }
@@ -599,7 +607,6 @@ io_utils_validate (struct sscg_stream **streams)
       goto done;
     }
 
-
   ret = IO_UTILS_OK;
 
 done:
@@ -614,7 +621,7 @@ sscg_io_utils_open_BIOs (struct sscg_stream **streams)
   enum io_utils_errors validation_result;
   struct sscg_stream *stream = NULL;
 
-  validation_result = io_utils_validate (streams);
+  validation_result = sscg_io_utils_validate (streams);
   switch (validation_result)
     {
     case IO_UTILS_TOOMANYKEYS:
@@ -655,7 +662,7 @@ sscg_io_utils_open_BIOs (struct sscg_stream **streams)
     case IO_UTILS_OK: break;
     }
 
-  for (int i = 0; (stream = streams[i]) && i < SSCG_NUM_FILE_TYPES; i++)
+  for (int i = 0; i < SSCG_NUM_FILE_TYPES && (stream = streams[i]); i++)
     {
       SSCG_LOG (SSCG_DEBUG, "Opening %s\n", stream->path);
       stream->bio = BIO_new_fp (stream->fp, BIO_NOCLOSE);
@@ -688,6 +695,13 @@ sscg_io_utils_write_privatekey (struct sscg_stream **streams,
     sscg_io_utils_get_stream_by_type (streams, filetype);
   if (stream)
     {
+      if (!key)
+        {
+          SSCG_ERROR ("No key provided for %s\n", stream->path);
+          ret = EINVAL;
+          goto done;
+        }
+
       /* This function has a default mechanism for prompting for the
        * password if it is passed a cipher and gets a NULL password.
        *
@@ -719,7 +733,7 @@ sscg_io_utils_finalize_output_files (struct sscg_stream **streams)
   struct sscg_stream *stream = NULL;
   FILE *fp;
 
-  for (int i = 0; (stream = streams[i]) && i < SSCG_NUM_FILE_TYPES; i++)
+  for (int i = 0; i < SSCG_NUM_FILE_TYPES && (stream = streams[i]); i++)
     {
       if (!stream->bio)
         {
@@ -749,7 +763,7 @@ sscg_io_utils_truncate_output_files (struct sscg_stream **streams)
 {
   struct sscg_stream *stream = NULL;
 
-  for (int i = 0; (stream = streams[i]) && i < SSCG_NUM_FILE_TYPES; i++)
+  for (int i = 0; i < SSCG_NUM_FILE_TYPES && (stream = streams[i]); i++)
     {
       errno = 0;
       if (ftruncate (fileno (stream->fp), 0) != 0)
@@ -760,13 +774,57 @@ sscg_io_utils_truncate_output_files (struct sscg_stream **streams)
   return EOK;
 }
 
+int
+sscg_io_utils_new_debug_csr_bio (const char *basename,
+                                 char *path_template,
+                                 size_t path_template_len,
+                                 BIO **_bio)
+{
+  int fd;
+  BIO *bio = NULL;
+  size_t min_len;
+  static const char suffix[] = ".csr";
+  static const size_t suffix_len = sizeof (suffix) - 1;
+
+  min_len =
+    strlen ("/tmp/") + strlen (basename) + strlen ("-XXXXXX") + suffix_len + 1;
+  if (path_template_len < min_len)
+    {
+      return EINVAL;
+    }
+
+  if (snprintf (
+        path_template, path_template_len, "/tmp/%s-XXXXXX%s", basename, suffix)
+      >= (int)path_template_len)
+    {
+      return EINVAL;
+    }
+
+  fd = mkstemps (path_template, (int)suffix_len);
+  if (fd < 0)
+    {
+      return errno;
+    }
+
+  bio = BIO_new_fd (fd, BIO_CLOSE);
+  if (!bio)
+    {
+      close (fd);
+      unlink (path_template);
+      return ENOMEM;
+    }
+
+  *_bio = bio;
+  return EOK;
+}
+
 void
 sscg_io_utils_delete_output_files (struct sscg_stream **streams)
 {
   struct sscg_stream *stream = NULL;
   int ret;
 
-  for (int i = 0; (stream = streams[i]) && i < SSCG_NUM_FILE_TYPES; i++)
+  for (int i = 0; i < SSCG_NUM_FILE_TYPES && (stream = streams[i]); i++)
     {
       errno = 0;
       SSCG_LOG (SSCG_DEBUG, "Deleting file %s\n", stream->path);
